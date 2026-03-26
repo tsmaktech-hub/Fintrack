@@ -1,0 +1,5 @@
+{
+  "name": "FinTrack",
+  "description": "A simple personal finance tracker with secure login and transaction management.",
+  "requestFramePermissions": []
+}

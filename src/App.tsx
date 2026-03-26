@@ -4,27 +4,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  auth, 
-  db, 
-  googleProvider, 
-  signInWithPopup, 
-  signOut, 
-  onAuthStateChanged, 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  addDoc, 
-  query, 
-  where, 
-  orderBy, 
-  onSnapshot, 
-  Timestamp,
-  User,
-  OperationType,
-  handleFirestoreError
-} from './firebase';
+import { supabase, isSupabaseConfigured } from './supabase';
 import { 
   Plus, 
   LogOut, 
@@ -32,30 +12,28 @@ import {
   TrendingDown, 
   Wallet, 
   History, 
-  PieChart, 
   ArrowUpRight, 
   ArrowDownRight,
-  Trash2,
-  Search,
-  Filter,
+  AlertCircle,
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
+import type { User } from '@supabase/supabase-js';
 
 // --- Types & Schemas ---
 
 interface Transaction {
   id: string;
-  uid: string;
+  user_id: string;
   amount: number;
   type: 'income' | 'expense';
   category: string;
   description: string;
   date: string;
-  createdAt: string;
+  created_at: string;
 }
 
 const transactionSchema = z.object({
@@ -69,6 +47,40 @@ const transactionSchema = z.object({
 type TransactionFormData = z.infer<typeof transactionSchema>;
 
 // --- Components ---
+
+const ConfigWarning: React.FC = () => (
+  <div className="min-h-screen flex items-center justify-center bg-[#f5f5f4] p-6">
+    <motion.div 
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className="max-w-md w-full bg-white rounded-[32px] shadow-sm p-10 border border-orange-100 text-center"
+    >
+      <div className="w-16 h-16 bg-orange-50 rounded-2xl flex items-center justify-center mx-auto mb-6">
+        <AlertCircle className="text-orange-500 w-8 h-8" />
+      </div>
+      <h2 className="text-2xl font-semibold text-gray-900 mb-4">Configuration Required</h2>
+      <p className="text-gray-600 mb-8 leading-relaxed">
+        To use Supabase, you need to set your project credentials in the <strong>Settings &gt; Secrets</strong> panel.
+      </p>
+      
+      <div className="space-y-3 text-left bg-gray-50 p-6 rounded-2xl mb-8 font-mono text-xs">
+        <p className="text-gray-400 uppercase tracking-wider font-bold mb-2">Required Secrets:</p>
+        <div className="flex justify-between items-center border-b border-gray-200 pb-2">
+          <span className="text-gray-700">VITE_SUPABASE_URL</span>
+          <span className="text-red-400">Missing</span>
+        </div>
+        <div className="flex justify-between items-center pt-2">
+          <span className="text-gray-700">VITE_SUPABASE_ANON_KEY</span>
+          <span className="text-red-400">Missing</span>
+        </div>
+      </div>
+
+      <p className="text-sm text-gray-400">
+        The app will automatically reload once the secrets are saved.
+      </p>
+    </motion.div>
+  </div>
+);
 
 const ErrorBoundary: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [hasError, setHasError] = useState(false);
@@ -106,19 +118,13 @@ const ErrorBoundary: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 const Auth: React.FC = () => {
   const handleLogin = async () => {
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const user = result.user;
-      
-      // Create user profile if it doesn't exist
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
-      if (!userDoc.exists()) {
-        await setDoc(doc(db, 'users', user.uid), {
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName,
-          createdAt: new Date().toISOString()
-        });
-      }
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) throw error;
     } catch (error) {
       console.error('Login failed:', error);
     }
@@ -160,22 +166,40 @@ const Dashboard: React.FC<{ user: User }> = ({ user }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [filter, setFilter] = useState<'all' | 'income' | 'expense'>('all');
 
+  const fetchTransactions = async () => {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('date', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching transactions:', error);
+    } else {
+      setTransactions(data || []);
+    }
+  };
+
   useEffect(() => {
-    const q = query(
-      collection(db, 'transactions'),
-      where('uid', '==', user.uid),
-      orderBy('date', 'desc')
-    );
+    fetchTransactions();
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const txs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction));
-      setTransactions(txs);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'transactions');
-    });
+    // Set up real-time subscription
+    const channel = supabase
+      .channel('transactions_changes')
+      .on('postgres_changes', { 
+        event: '*', 
+        schema: 'public', 
+        table: 'transactions',
+        filter: `user_id=eq.${user.id}`
+      }, () => {
+        fetchTransactions();
+      })
+      .subscribe();
 
-    return () => unsubscribe();
-  }, [user.uid]);
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user.id]);
 
   const stats = useMemo(() => {
     const income = transactions
@@ -199,15 +223,19 @@ const Dashboard: React.FC<{ user: User }> = ({ user }) => {
 
   const onSubmit = async (data: TransactionFormData) => {
     try {
-      await addDoc(collection(db, 'transactions'), {
-        ...data,
-        uid: user.uid,
-        createdAt: new Date().toISOString()
-      });
+      const { error } = await supabase
+        .from('transactions')
+        .insert([{
+          ...data,
+          user_id: user.id,
+          created_at: new Date().toISOString()
+        }]);
+
+      if (error) throw error;
       setIsAdding(false);
       reset();
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'transactions');
+      console.error('Error adding transaction:', error);
     }
   };
 
@@ -224,11 +252,11 @@ const Dashboard: React.FC<{ user: User }> = ({ user }) => {
           </div>
           <div className="flex items-center gap-4">
             <div className="text-right hidden sm:block">
-              <p className="text-sm font-medium text-gray-900">{user.displayName}</p>
+              <p className="text-sm font-medium text-gray-900">{user.user_metadata.full_name || user.email}</p>
               <p className="text-xs text-gray-500">{user.email}</p>
             </div>
             <button 
-              onClick={() => signOut(auth)}
+              onClick={() => supabase.auth.signOut()}
               className="p-2.5 hover:bg-gray-100 rounded-xl transition-colors text-gray-500"
             >
               <LogOut className="w-5 h-5" />
@@ -478,11 +506,18 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
       setLoading(false);
     });
-    return () => unsubscribe();
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   if (loading) {
@@ -495,6 +530,10 @@ export default function App() {
         />
       </div>
     );
+  }
+
+  if (!isSupabaseConfigured) {
+    return <ConfigWarning />;
   }
 
   return (

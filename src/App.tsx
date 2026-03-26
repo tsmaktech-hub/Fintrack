@@ -503,9 +503,11 @@ const Dashboard: React.FC<{ user: User }> = ({ user }) => {
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(isSupabaseConfigured);
 
   useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
@@ -520,6 +522,10 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
+  if (!isSupabaseConfigured) {
+    return <ConfigWarning />;
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#f5f5f4]">
@@ -530,10 +536,6 @@ export default function App() {
         />
       </div>
     );
-  }
-
-  if (!isSupabaseConfigured) {
-    return <ConfigWarning />;
   }
 
   return (
